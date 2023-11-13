@@ -32,6 +32,12 @@ from itertools import chain
 from typing import Optional, Union, Any, List
 from collections.abc import Mapping
 import torch.distributions as distributions
+from tqdm.auto import tqdm
+import pandas as pd
+from scipy.special import softmax
+
+# Import time module
+import time
 
 import datasets
 import torch
@@ -219,12 +225,13 @@ class DataTrainingArguments:
             "help": "Choose if topk selected adapters should be weighted equally"
         },
     )
-    consider_model: Optional[bool] = field(
+    evaluate_efficiency: Optional[bool] = field(
         default=False,
         metadata={
-            "help": "Should the model be considered as well?"
+            "help": "Set to true if you want to print out timings for the different calculation steps. These will be stored in a file called log_timings.txt"
         },
     )
+
 
     # Usual arguments
     dataset_name: Optional[str] = field(
@@ -328,30 +335,6 @@ def main():
     transformers.utils.logging.enable_default_handler()
     transformers.utils.logging.enable_explicit_format()
 
-    if not training_args.do_train:
-        with open(data_args.eval_file, 'a+') as outfile:
-            outfile.write("New Evaluation")
-            outfile.write("\n")
-            outfile.write("Model to evaluate: ")
-            outfile.write(model_args.model_name_or_path)
-            outfile.write("\n")
-            outfile.write("Seed: ")
-            outfile.write(str(training_args.seed))
-            outfile.write("\n")
-            outfile.write(data_args.validation_file)
-            outfile.write("\n")
-            if data_args.combination_strategy:
-                outfile.write(data_args.combination_strategy)
-                outfile.write("\n")
-            if data_args.adapter_weighting:
-                outfile.write(data_args.adapter_weighting)
-                outfile.write("\n")
-            if data_args.top_k:
-                outfile.write("TOP-K: ")
-                outfile.write(str(data_args.top_k))
-                outfile.write("\n")
-            if data_args.topk_uniform:
-                outfile.write("TOP-K uniformly weighted")
 
 
 
@@ -454,11 +437,7 @@ def main():
     if model_args.config_name:
         config = AutoConfig.from_pretrained(model_args.config_name, **config_kwargs)
     elif model_args.model_name_or_path:
-        if 'llama' in model_args.model_name_or_path:
-            from transformers import LlamaConfig
-            config = LlamaConfig()
-        else:
-            config = AutoConfig.from_pretrained(model_args.model_name_or_path, **config_kwargs)
+        config = AutoConfig.from_pretrained(model_args.model_name_or_path, **config_kwargs)
     else:
         config = CONFIG_MAPPING[model_args.model_type]()
         logger.warning("You are instantiating a new config instance from scratch.")
@@ -476,11 +455,7 @@ def main():
     if model_args.tokenizer_name:
         tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
     elif model_args.model_name_or_path:
-        if 'llama' in model_args.model_name_or_path:
-            from transformers import LlamaTokenizer
-            tokenizer = LlamaTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
-        else:
-            tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
@@ -488,36 +463,20 @@ def main():
         )
 
     if model_args.model_name_or_path:
-        if 'llama' in model_args.model_name_or_path:
-            from transformers import LlamaForCausalLM
-            torch_dtype = (
-                model_args.torch_dtype
-                if model_args.torch_dtype in ["auto", None]
-                else getattr(torch, model_args.torch_dtype)
-            )
-            model = LlamaForCausalLM.from_pretrained(
-                model_args.model_name_or_path,
-                from_tf=bool(".ckpt" in model_args.model_name_or_path),
-                cache_dir=model_args.cache_dir,
-                revision=model_args.model_revision,
-                use_auth_token=True if model_args.use_auth_token else None,
-                torch_dtype=torch_dtype,
-            )
-        else:
-            torch_dtype = (
-            model_args.torch_dtype
-            if model_args.torch_dtype in ["auto", None]
-            else getattr(torch, model_args.torch_dtype)
-            )
-            model = AutoModelForCausalLM.from_pretrained(
-                model_args.model_name_or_path,
-                from_tf=bool(".ckpt" in model_args.model_name_or_path),
-                config=config,
-                cache_dir=model_args.cache_dir,
-                revision=model_args.model_revision,
-                use_auth_token=True if model_args.use_auth_token else None,
-                torch_dtype=torch_dtype,
-            )
+        torch_dtype = (
+        model_args.torch_dtype
+        if model_args.torch_dtype in ["auto", None]
+        else getattr(torch, model_args.torch_dtype)
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_args.model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=True if model_args.use_auth_token else None,
+            torch_dtype=torch_dtype,
+        )
     else:
         model = AutoModelForCausalLM.from_config(config)
         n_params = sum(dict((p.data_ptr(), p.numel()) for p in model.parameters()).values())
@@ -558,11 +517,10 @@ def main():
         """
         try:
             dataset = dataloader.dataset
-            # Special case for IterableDatasetShard, we need to dig deeper
             if isinstance(dataset, IterableDatasetShard):
                 return len(dataloader.dataset.dataset)
             return len(dataloader.dataset)
-        except (NameError, AttributeError, TypeError):  # no dataset or length, estimate by length of dataloader
+        except (NameError, AttributeError, TypeError):  
             return len(dataloader) * training_args.per_device_train_batch_size
 
     def _prepare_input(data: Union[torch.Tensor, Any]) -> Union[torch.Tensor, Any]:
@@ -585,7 +543,6 @@ def main():
 
         Subclass and override for custom behavior.
         """
-        # Label smoothing
         if training_args.label_smoothing_factor != 0:
             label_smoother = LabelSmoother(epsilon=training_args.label_smoothing_factor)
         else:
@@ -596,8 +553,6 @@ def main():
         else:
             labels = None
         outputs = model(**inputs)
-        # Save past state if it exists
-        # TODO: this needs to be fixed and made cleaner later.
         if training_args.past_index >= 0:
             _past = outputs[training_args.past_index]
 
@@ -767,12 +722,10 @@ def main():
 
             by_word_uncertainty = distributions.Categorical(logits=logits).entropy()  # logits or probs?
 
-            #
             if torch.isnan(by_word_uncertainty).sum() > 0:
                 print("Nan entropy!")
                 raise ValueError
-            #
-            # by_query_uncertainty = by_word_uncertainty.mean(dim = 1)
+
             return by_word_uncertainty
 
 
@@ -968,20 +921,13 @@ def main():
                     use_auth_token=True if model_args.use_auth_token else None,
                     torch_dtype=torch_dtype,
                 )
-                if 'llama' in model_args.model_name_or_path:
-                    eval_model.load_adapter(
-                        data_args.adapter_dir[0],
-                        load_as="adapter",
-                        config=AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=32,
-                                             non_linearity="relu", ln_before=True, ln_after=False)
-                    )
-                else:
-                    eval_model.load_adapter(
-                        data_args.adapter_dir[0],
-                        load_as="adapter",
-                        config=AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=12,
-                                             non_linearity="relu", ln_before=True, ln_after=False)
-                    )
+
+                eval_model.load_adapter(
+                    data_args.adapter_dir[0],
+                    load_as="adapter",
+                    config=AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=12,
+                                            non_linearity="relu", ln_before=True, ln_after=False)
+                )
                 eval_model.set_active_adapters("adapter")
                 eval_model.load_state_dict(state_dicts_current[0])
 
@@ -1075,14 +1021,11 @@ def main():
             mean_uncertainty = torch.mean(all_uncertainties).item()
             return mean_uncertainty
 
-        def get_uncertainty_list(model, chosen_adapter_ids = None, consider_model = False):
+        def get_uncertainty_list(model, chosen_adapter_ids = None):
             adapter_uncertainties = []
             if chosen_adapter_ids:
                 state_dicts_topk = []
                 for id in chosen_adapter_ids:
-                    print("Adapter chosen:")
-                    print(id)
-                    print(data_args.adapter_dir[id])
                     model.load_adapter(
                         data_args.adapter_dir[id],
                         load_as="adapter"
@@ -1102,7 +1045,6 @@ def main():
                     if chosen_adapter_ids:
                         if i in chosen_adapter_ids:
                             adapter_uncertainties.append(100)
-                            print("Adapter already there")
                             continue
                     model.load_adapter(
                         data_args.adapter_dir[i],
@@ -1136,20 +1078,13 @@ def main():
                         use_auth_token=True if model_args.use_auth_token else None,
                         torch_dtype=torch_dtype,
                     )
-                    if 'llama' in model_args.model_name_or_path:
-                        model.load_adapter(
-                            data_args.adapter_dir[0],
-                            load_as="adapter",
-                            config=AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=32,
-                                                 non_linearity="relu", ln_before=True, ln_after=False)
-                        )
-                    else:
-                        model.load_adapter(
-                            data_args.adapter_dir[0],
-                            load_as="adapter",
-                            config=AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=12,
-                                                 non_linearity="relu", ln_before=True, ln_after=False)
-                        )
+
+                    model.load_adapter(
+                        data_args.adapter_dir[0],
+                        load_as="adapter",
+                        config=AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=12,
+                                                non_linearity="relu", ln_before=True, ln_after=False)
+                    )
                     model.set_active_adapters("adapter")
                     model.load_state_dict(total_state_dicts[0])
 
@@ -1161,13 +1096,6 @@ def main():
                     # Delete the added adapter
                     model.delete_adapter("adapter")
 
-
-
-
-            if consider_model and data_args.combination_strategy == 'ensemble':
-                mean_uncertainty = get_uncertainty_for_model(model, eval_dataset, eval_dataloader)
-                adapter_uncertainties.append(mean_uncertainty)
-                print("model considered")
 
 
             if not chosen_adapter_ids:
@@ -1197,215 +1125,187 @@ def main():
             )
             return probs
 
-        def get_priors(model, consider_model = False, chosen_adapter_ids = None):
+        def get_priors(model, chosen_adapter_ids=None):
 
-            if chosen_adapter_ids:
-                if len(chosen_adapter_ids) == 1:
-                    chosen_id = chosen_adapter_ids[0]
-                    adapter_name = "chosen_top_1"
-                    model.load_adapter(
-                        data_args.adapter_dir[chosen_id],
-                        load_as=adapter_name
-                    )
-                    model.set_active_adapters(adapter_name)
-                else:
-                    model.set_active_adapters(None)
-                    model.delete_adapter("chosen_top_1")
-                    state_dicts = []
-                    for chosen_id in chosen_adapter_ids:
-                        print(chosen_id)
-                        model.load_adapter(
-                            data_args.adapter_dir[chosen_id],
-                            load_as="chosen_top_1",
-                        )
-                        model.set_active_adapters("chosen_top_1")
-                        state_dicts.append(model.state_dict())
-
-                        # Deactivate all adapters
-                        model.set_active_adapters(None)
-                        # Delete the added adapter
-                        model.delete_adapter("chosen_top_1")
+            # The following lines: 1130 - 1310 are partially adapted from the following original sources: 
+            # https://github.com/kernelmachine/cbtm/blob/d4c169f0dd3d8d4c5fc223eb8558ef4b9ab0705d/metaseq/sequence_scorer_btm.py
+            # and
+            # https://github.com/kernelmachine/cbtm/blob/d4c169f0dd3d8d4c5fc223eb8558ef4b9ab0705d/metaseq/sequence_scorer.py            # 
 
 
-                    logger.info("*** All adapters are equally weighted ***")
-                    for key in state_dicts[0]:
-                        sum_state_dicts_of_key = 0
-                        if "adapter" in key:
-                            for i in range(len(state_dicts)):
-                                sum_state_dicts_of_key += state_dicts[i][key].to('cpu')
-                            state_dicts[0][key] = sum_state_dicts_of_key / len(state_dicts)
+            # Copyright 2023 Suchin Gururangan et al. All rights reserved.
 
-                    #torch.cuda.empty_cache()
+            # Licensed under the Apache License, Version 2.0 (the "License");
+            # you may not use this file except in compliance with the License.
+            # You may obtain a copy of the License at
 
-                    model = AutoModelForCausalLM.from_pretrained(
-                        model_args.model_name_or_path,
-                        from_tf=bool(".ckpt" in model_args.model_name_or_path),
-                        config=config,
-                        cache_dir=model_args.cache_dir,
-                        revision=model_args.model_revision,
-                        use_auth_token=True if model_args.use_auth_token else None,
-                        torch_dtype=torch_dtype,
-                    )
+            #     http://www.apache.org/licenses/LICENSE-2.0
 
-                    if 'llama' in model_args.model_name_or_path:
-                        model.load_adapter(
-                            data_args.adapter_dir[0],
-                            load_as="chosen_top_1",
-                            config=AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=32,
-                                                 non_linearity="relu", ln_before=True, ln_after=False)
-                        )
-                    else:
-                        model.load_adapter(
-                            data_args.adapter_dir[0],
-                            load_as="chosen_top_1",
-                            config=AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=12,
-                                                 non_linearity="relu", ln_before=True, ln_after=False)
-                        )
-                    model.set_active_adapters("chosen_top_1")
-                    model.load_state_dict(state_dicts[0])
+            # Unless required by applicable law or agreed to in writing, software
+            # distributed under the License is distributed on an "AS IS" BASIS,
+            # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+            # See the License for the specific language governing permissions and
+            # limitations under the License.
+
 
 
             logger.info("*** We estimate the adapter weights using prior estimation ***")
 
+            def batch_for_softmax(dec_out, target):
+                first = dec_out.logits
+                bsz, tsz, dim = first.shape
+                if bsz * tsz < sys.maxsize:
+                    yield dec_out, target, True
+                else:
+                    flat = first.contiguous().view(1, -1, dim)
+                    flat_tgt = target.contiguous().view(flat.shape[:-1])
+                    s = 0
+                    while s < flat.size(1):
+                        e = s + sys.maxsize
+                        yield (flat[:, s:e],), flat_tgt[:, s:e], False
+                        s = e
 
-            # Loop through all adapters and get the predictions
-            model_probs = []
-            if consider_model:
+            prior_sampler = SequentialSampler(eval_dataset)
 
-                model = model.to(dtype=torch.float16, device=training_args.device)
+            data_collator = default_data_collator
 
-                model.eval()
+            prior_dataloader = DataLoader(
+                eval_dataset,
+                sampler=prior_sampler,
+                batch_size=1,
+                collate_fn=data_collator,
+                drop_last=training_args.dataloader_drop_last,
+                num_workers=training_args.dataloader_num_workers,
+                pin_memory=training_args.dataloader_pin_memory,
+            )
 
-                all_preds = None
-                for step, inputs in enumerate(eval_dataloader):
+            expert_probs_all = []
+            priors_all = []
+            pbar = tqdm(enumerate(prior_dataloader))
+            for step, sample in pbar:
 
-                    inputs = _prepare_input(inputs)
+                sample = _prepare_input(sample)
 
-                    # Get labels if task does not have labels
-                    default_label_names = find_labels(model.__class__)
-                    label_names = default_label_names if training_args.label_names is None else training_args.label_names
+                # compute scores for each model in the ensemble
+                avg_probs = None
+                avg_attn = None
+                model_probs = []
+                for i in range(len(data_args.adapter_dir)):
+                    adapter_name = "adapter" + str(i)
+                    model.load_adapter(
+                        data_args.adapter_dir[i],
+                        load_as=adapter_name
+                    )
+                    model.set_active_adapters(adapter_name)
 
-                    has_labels = False if len(label_names) == 0 else all(inputs.get(k) is not None for k in label_names)
+                    model = model.to(dtype=torch.float16, device=training_args.device)
 
-                    return_loss = inputs.get("return_loss", None)
-                    if return_loss is None:
-                        return_loss = can_return_loss(model.__class__)
-                    loss_without_labels = True if len(label_names) == 0 and return_loss else False
+                    model.eval()
 
-                    if has_labels or loss_without_labels:
-                        labels = nested_detach(tuple(inputs.get(name) for name in label_names))
-                        if len(labels) == 1:
-                            labels = labels[0]
-                    else:
-                        labels = None
+                    out = model(**sample)
+                    batched = batch_for_softmax(out, sample['labels'])
 
-                    with torch.no_grad():
-                        outputs = model(**inputs)
+                    orig_target = sample['labels']
 
-                        curr_prob = torch.nn.functional.softmax(outputs.logits, dim=-1).data
-                        probs = gather_target_probs(curr_prob, labels)
+                    probs, idx = None, 0
+                    for bd, tgt, is_single in batched:
+                        sample["labels"] = tgt
+                        curr_prob = torch.nn.functional.softmax(bd.logits, dim=-1).data
+                        if is_single:
+                            probs = gather_target_probs(curr_prob, orig_target)
+                        else:
+                            if probs is None:
+                                probs = curr_prob.new(orig_target.numel())
+                            step = curr_prob.size(0) * curr_prob.size(1)
+                            end = step + idx
+                            tgt_probs = gather_target_probs(
+                                curr_prob.view(tgt.shape + (curr_prob.size(-1),)), tgt
+                            )
+                            probs[idx:end] = tgt_probs.view(-1)
+                            idx = end
+                        sample["labels"] = orig_target
 
-                        probs = probs.view(labels.shape)
+                    probs = probs.view(sample["labels"].shape)
 
-                    # Update containers on host
-                    if probs is not None:
-                        all_preds = probs if all_preds is None else nested_concat(all_preds, probs,
-                                                                                  padding_index=-100)
-                model_probs.append(all_preds.unsqueeze(0))
+                    model_probs.append(probs.unsqueeze(0))
 
+                model_probs = torch.cat(model_probs, dim=0)
 
+                len_models = len(data_args.adapter_dir)
 
-            for i in range(len(data_args.adapter_dir)):
-                adapter_name = "adapter" + str(i)
-                model.load_adapter(
-                    data_args.adapter_dir[i],
-                    load_as=adapter_name
-                )
-                model.set_active_adapters(adapter_name)
+                priors = [1 / len_models] * len_models
 
-                model = model.to(dtype=torch.float16, device=training_args.device)
+                weights = model_probs[:, :, :-1].clone()
 
-                model.eval()
+                # calculate normalization
+                denom = weights.clone()
+                for ix, prior in enumerate(priors):
+                    denom[ix, :].mul_(prior)
 
-                all_preds = None
-                for step, inputs in enumerate(eval_dataloader):
+                denom = denom.sum(0)
 
-                    inputs = _prepare_input(inputs)
+                # calculate posterior
+                for ix, prior in enumerate(priors):
+                    weights[ix, :].mul_(prior).div_(denom)
 
-                    #print(inputs)
-                    #print(inputs['input_ids'])
-                    #print(inputs['attention_mask'])
-                    #print(inputs['labels'])
+                beginning_weights = torch.tensor(priors).float().repeat(model_probs.shape[1], 1).t().unsqueeze(2).to(
+                    weights)
 
-                    # Get labels if task does not have labels
-                    default_label_names = find_labels(model.__class__)
-                    label_names = default_label_names if training_args.label_names is None else training_args.label_names
+                weights = torch.cat([beginning_weights, weights], -1)
 
-                    has_labels = False if len(label_names) == 0 else all(inputs.get(k) is not None for k in label_names)
+                
+                expert_probs = weights[:, :, -1]
+                skipper_counter = 0
+                if torch.isnan(expert_probs).any():
+                    skipper_counter += 1
+                    continue
 
-                    return_loss = inputs.get("return_loss", None)
-                    if return_loss is None:
-                        return_loss = can_return_loss(model.__class__)
-                    loss_without_labels = True if len(label_names) == 0 and return_loss else False
+                expert_probs = expert_probs.mean(1).unsqueeze(0).cpu().numpy()
 
-                    if has_labels or loss_without_labels:
-                        labels = nested_detach(tuple(inputs.get(name) for name in label_names))
-                        if len(labels) == 1:
-                            labels = labels[0]
-                    else:
-                        labels = None
+                expert_probs_all.append(expert_probs)
+                
+                prior = pd.DataFrame(np.concatenate(expert_probs_all, 0)).ewm(alpha=0.3, adjust=False).mean().tail(
+                    n=1).to_numpy().squeeze(0)
+                
+                priors_all.append(prior)
 
-                    with torch.no_grad():
-                        outputs = model(**inputs)
+                if step >= 99:
+                    break
 
+            expert_probs_list = [x.tolist()[0] for x in expert_probs_all]
 
-                        curr_prob = torch.nn.functional.softmax(outputs.logits, dim=-1).data
-                        probs = gather_target_probs(curr_prob, labels)
+            last_prior = priors_all[-1]
 
-                        probs = probs.view(labels.shape)
+            weight_vector = last_prior
 
+            if data_args.top_k:
+                # Enumerate the list elements along with their indices
+                enum_weights = list(enumerate(last_prior))
 
-                    # Update containers on host
-                    if probs is not None:
-                        all_preds = probs if all_preds is None else nested_concat(all_preds, probs,
-                                                                                     padding_index=-100)
+                # Sort the list of tuples by the second element (the weights) in descending order
+                sorted_weights = sorted(enum_weights, key=lambda x: x[1], reverse=True)[:data_args.top_k]
 
-                model_probs.append(all_preds.unsqueeze(0))
-                # Deactivate all adapters
-                model.set_active_adapters(None)
-                # Delete the added adapter
-                model.delete_adapter(adapter_name)
+                # Create a new list with the same length as `new_weights` and set all elements to 0
+                new_prior = [0] * len(last_prior)
 
-            len_models = len(data_args.adapter_dir)
-            if consider_model:
-                len_models = len_models + 1
-            model_probs = torch.cat(model_probs, dim=0)
-            weights = model_probs[:, :, :-1].clone() #torch.Size([4, 13, 50256])
+                # Set the topk elements in the new list to their corresponding values from the sorted list
+                for index, weight in sorted_weights:
+                    new_prior[index] = weight
 
-            priors = [1 / len_models] * len_models
+                # Normalize the new_weights list
+                if data_args.topk_uniform:
+                    new_prior = [1 if a_ > 0 else 0 for a_ in new_prior]
+                    new_prior = np.array(new_prior) / sum(new_prior)
+                    weight_vector = new_prior
+                else:
+                    new_prior = np.array(new_prior) / sum(new_prior)
+                    weight_vector = new_prior
 
-            # calculate normalization
-            denom = weights.clone()
+                adapters_to_use = []
+                for i in range(len(weight_vector)):
+                    if weight_vector[i] != 0:
+                        adapters_to_use.append(data_args.adapter_dir[i])
 
-            for ix, prior in enumerate(priors):
-                denom[ix, :].mul_(prior)
-
-            denom = denom.sum(0)
-
-            # calculate posterior
-            for ix, prior in enumerate(priors):
-                weights[ix, :].mul_(prior).div_(denom)
-
-            beginning_weights = torch.tensor([1 / len_models]).repeat(
-                len_models, model_probs.shape[1], 1).to(weights)
-
-            weights = torch.cat([beginning_weights, weights], -1)
-
-            ## get weighted mixture
-            expert_probs = weights.nanmean(-1)
-            expert_probs = expert_probs.mean(1).unsqueeze(0).cpu().numpy()
-            weight_vector = expert_probs[0]
-            torch.cuda.empty_cache()
 
             return weight_vector
 
@@ -1413,6 +1313,8 @@ def main():
         # Calculate the weights of adapters using different strategies
         if data_args.adapter_dir and len(data_args.adapter_dir) > 1 and data_args.adapter_weighting != 'uniform':
             if data_args.adapter_weighting == 'entropy':
+                # record start time
+                start_entropy = time.time()
                 logger.info("*** We estimate the adapter weights using entropy minimization ***")
 
 
@@ -1422,24 +1324,8 @@ def main():
                     chosen_adapter_ids = {}
                     for k in range(1, data_args.top_k +1):
                         adapter_uncertainties = get_uncertainty_list(model, chosen_adapter_ids)
-                        with open(data_args.eval_file, 'a+') as outfile:
-                            outfile.write("These are the adapter_uncertainties chosen: ")
-                            if isinstance(adapter_uncertainties, np.ndarray):
-                                adapter_uncertainties = adapter_uncertainties.tolist()
-                            json.dump(adapter_uncertainties, outfile)
-                            outfile.write("\n")
                         thres = min(adapter_uncertainties)
-                        with open(data_args.eval_file, 'a+') as outfile:
-                            outfile.write("These are the is the lowest uncertainty chosen: ")
-                            outfile.write(str(thres))
-                            outfile.write("\n")
                         old_uncerts = [0 if a_ > thres else a_ for a_ in adapter_uncertainties]
-                        with open(data_args.eval_file, 'a+') as outfile:
-                            outfile.write("These are the adapter_uncertainties chosen: ")
-                            if isinstance(old_uncerts, np.ndarray):
-                                old_uncerts = old_uncerts.tolist()
-                            json.dump(old_uncerts, outfile)
-                            outfile.write("\n")
                         for i in range(len(old_uncerts)):
                             if old_uncerts[i] != 0:
                                 #chosen_adapter_ids.append(i)
@@ -1458,58 +1344,23 @@ def main():
 
                         ppl = get_current_ppl(eval_dataset, current_weight_vector)
 
-                        with open(data_args.eval_file, 'a+') as outfile:
-                            outfile.write("These are the adapter_uncertainties chosen: ")
-                            if isinstance(adapter_uncertainties, np.ndarray):
-                                adapter_uncertainties = adapter_uncertainties.tolist()
-                            json.dump(adapter_uncertainties, outfile)
-                            outfile.write("\n")
-                            outfile.write("These are the adapter weights: ")
-                            if isinstance(adapter_uncertainties, np.ndarray):
-                                current_weight_vector = current_weight_vector.tolist()
-                            json.dump(current_weight_vector, outfile)
-                            outfile.write("\n")
-                            outfile.write("This is the current perplexity: ")
-                            outfile.write(str(ppl))
-                            outfile.write("\n")
 
                         for pos in range(len(adapter_uncertainties)):
                             if pos in chosen_adapter_ids.keys():
                                 adapter_uncertainties[pos] = chosen_adapter_ids[pos]
                             else:
                                 adapter_uncertainties[pos] = 0
-                        print(adapter_uncertainties)
 
                     adapters_to_use = []
                     for i in range(len(adapter_uncertainties)):
-                        if data_args.consider_model and i == 0 and adapter_uncertainties[i] != 0:
-                            adapters_to_use.append('model')
-                        elif adapter_uncertainties[i] != 0:
+                        if adapter_uncertainties[i] != 0:
                             k = i
-                            if data_args.consider_model:
-                                k = i - 1
                             adapters_to_use.append(data_args.adapter_dir[k])
-                    with open(data_args.eval_file, 'a+') as outfile:
-                        outfile.write("These are the adapters that are weighted: ")
-                        if isinstance(adapters_to_use, np.ndarray):
-                            adapters_to_use = adapters_to_use.tolist()
-                        json.dump(adapters_to_use, outfile)
-                        outfile.write("\n")
                     for u in adapter_uncertainties:
                         weight_vector.append(u / sum(adapter_uncertainties))
 
-                else:
-                    print("Evaluate adapter uncertainties with model")
-                    adapter_uncertainties = get_uncertainty_list(model, None, data_args.consider_model)
 
-                with open(data_args.eval_file, 'a+') as outfile:
-                    outfile.write("These are the adapter_uncertainties: ")
-                    if isinstance(adapter_uncertainties, np.ndarray):
-                        adapter_uncertainties = adapter_uncertainties.tolist()
-                    json.dump(adapter_uncertainties, outfile)
-                    outfile.write("\n")
-
-                from scipy.special import softmax
+                
 
                 torch.cuda.empty_cache()
 
@@ -1527,19 +1378,9 @@ def main():
 
                     adapters_to_use = []
                     for i in range(len(adapter_uncertainties)):
-                        if data_args.consider_model and i == 0 and adapter_uncertainties[i] != 0:
-                            adapters_to_use.append('model')
-                        elif adapter_uncertainties[i] != 0:
+                        if adapter_uncertainties[i] != 0:
                             k = i
-                            if data_args.consider_model:
-                                k = i - 1
                             adapters_to_use.append(data_args.adapter_dir[k])
-                    with open(data_args.eval_file, 'a+') as outfile:
-                        outfile.write("These are the adapters that are weighted: ")
-                        if isinstance(adapters_to_use, np.ndarray):
-                            adapters_to_use = adapters_to_use.tolist()
-                        json.dump(adapters_to_use, outfile)
-                        outfile.write("\n")
                     for u in adapter_uncertainties:
                         weight_vector.append(u / sum(adapter_uncertainties))
 
@@ -1549,10 +1390,21 @@ def main():
                     for u in adapter_uncertainties:
                         weight_vector.append(u / sum(adapter_uncertainties))
 
+                end_entropy = time.time()
+
+                entropy_duration = end_entropy - start_entropy
+
+                if data_args.evaluate_efficiency:
+                    with open("log_timings.txt", 'a+') as timing_file:
+                        timing_file.write("Duration entropy: ")
+                        timing_file.write(str(entropy_duration))
+                        timing_file.write("\n")
+
 
 
 
             if data_args.adapter_weighting == 'tfidf':
+                start_tfidf = time.time()
                 if data_args.adapter_val_files is None:
                     raise ValueError("To compute the tf-idf we need the name of the validation files of the adapters")
                 import nltk
@@ -1565,8 +1417,6 @@ def main():
                 def stem_tokens(tokens):
                     return [stemmer.stem(item) for item in tokens]
 
-                '''remove punctuation, lowercase, stem'''
-
                 def normalize(text):
                     return stem_tokens(nltk.word_tokenize(text.lower().translate(remove_punctuation_map)))
 
@@ -1574,7 +1424,7 @@ def main():
                     tfidf = vectorizer.fit_transform([text1, text2])
                     return ((tfidf * tfidf.T).A)[0, 1]
 
-                logger.info("*** We estimate the adapter weights using tf-idf and cosine sim on 100 sequences of the eval set ***")
+                logger.info("*** We estimate the adapter weights using tf-idf and cosine sim on 100 sequences of the validation set ***")
 
                 # Load test sequences
                 with open(data_args.validation_file, 'r') as f:
@@ -1597,25 +1447,12 @@ def main():
                     cos_sim = cosine_sim(sequences_train_100_string, sequences_test_100_string)
                     cos_sims.append(cos_sim)
 
-                with open(data_args.eval_file, 'a+') as outfile:
-                    outfile.write("These are the cosine similarities: ")
-                    if isinstance(cos_sims, np.ndarray):
-                        cos_sims = cos_sims.tolist()
-                    json.dump(cos_sims, outfile)
-                    outfile.write("\n")
 
                 if data_args.top_k:
                     adapters_to_use = []
                     sorted_cos = sorted(cos_sims, reverse=True)
-                    #print(sorted_cos)
-                    #thres = 0.5
-                    #if max(sorted_cos) < thres:
-                    #    thres = max(sorted_cos)
-                    #if sorted_cos[data_args.top_k - 1] > 0.5:
-                    #    thres = sorted_cos[data_args.top_k - 1]
                     thres = sorted_cos[data_args.top_k - 1]
 
-                    # Count the occurrences of the threshold (5th largest number)
                     count_threshold = sorted_cos.count(thres)
 
                     if count_threshold > 1:
@@ -1647,20 +1484,25 @@ def main():
                     for i in range(len(cos_sims)):
                         if cos_sims[i] != 0:
                             adapters_to_use.append(data_args.adapter_dir[i])
-                    with open(data_args.eval_file, 'a+') as outfile:
-                        outfile.write("These are the adapters that are weighted: ")
-                        if isinstance(adapters_to_use, np.ndarray):
-                            adapters_to_use = adapters_to_use.tolist()
-                        json.dump(adapters_to_use, outfile)
-                        outfile.write("\n")
                     for c in cos_sims:
                         weight_vector.append(c / sum(cos_sims))
                 else:
                     for c in cos_sims:
                         weight_vector.append(c / sum(cos_sims))
 
+                end_tfidf = time.time()
+
+                tfidf_duration = end_tfidf - start_tfidf
+
+                if data_args.evaluate_efficiency:
+                    with open("log_timings.txt", 'a+') as timing_file:
+                        timing_file.write("Duration tfidf_calc: ")
+                        timing_file.write(str(tfidf_duration))
+                        timing_file.write("\n")
+
 
             if data_args.adapter_weighting == 'sent_sim':
+                start_sent_sim = time.time()
                 from sentence_transformers import SentenceTransformer
                 from numpy.linalg import norm
                 sent_model = SentenceTransformer('all-mpnet-base-v2')
@@ -1696,12 +1538,6 @@ def main():
                         avg_cos = 0
                     cos_sims.append(avg_cos)
 
-                with open(data_args.eval_file, 'a+') as outfile:
-                    outfile.write("These are the cosine similarities: ")
-                    if isinstance(cos_sims, np.ndarray):
-                        cos_sims = cos_sims.tolist()
-                    json.dump(cos_sims, outfile)
-                    outfile.write("\n")
 
 
                 if data_args.top_k:
@@ -1742,84 +1578,69 @@ def main():
                     for i in range(len(cos_sims)):
                         if cos_sims[i] != 0:
                             adapters_to_use.append(data_args.adapter_dir[i])
-                    with open(data_args.eval_file, 'a+') as outfile:
-                        outfile.write("These are the adapters that are weighted: ")
-                        if isinstance(adapters_to_use, np.ndarray):
-                            adapters_to_use = adapters_to_use.tolist()
-                        json.dump(adapters_to_use, outfile)
-                        outfile.write("\n")
                     for c in cos_sims:
                         weight_vector.append(c / sum(cos_sims))
                 else:
                     for c in cos_sims:
                         weight_vector.append(c / sum(cos_sims))
+
+                end_sent_sim = time.time()
+
+                sent_sim_duration = end_sent_sim - start_sent_sim
+
+                if data_args.evaluate_efficiency:
+                    with open("log_timings.txt", 'a+') as timing_file:
+                        timing_file.write("Duration sent_calc: ")
+                        timing_file.write(str(sent_sim_duration))
+                        timing_file.write("\n")
+
+                    
 
 
 
         if data_args.adapter_weighting == 'prior':
+            start_prior = time.time()
+
 
             eval_dataloader = get_dataloader(eval_dataset)
 
-            if data_args.top_k:
-                if data_args.cumulative_gain:
-                    chosen_adapter_ids = {}
-                    for k in range(1, data_args.top_k + 1):
-                        weight_vector = get_priors(model, data_args.consider_model, chosen_adapter_ids)
-                        thres = max(weight_vector)
-                        old_weights = [0 if a_ < thres else a_ for a_ in weight_vector]
-                        for i in range(len(old_weights)):
-                            if old_weights[i] != 0:
-                                #chosen_adapter_ids.append(i)
-                                chosen_adapter_ids[i] = old_weights[i]
-                                break
-                        print("These are the chosens")
-                        print(chosen_adapter_ids)
+            if data_args.cumulative_gain:
+                chosen_adapter_ids = []
+                for k in range(1, data_args.top_k + 1):
+                    weight_vector = get_priors(model, chosen_adapter_ids)
+                    thres = max(weight_vector)
+                    old_weights = [0 if a_ < thres else a_ for a_ in weight_vector]
+                    for i in range(len(old_weights)):
+                        if old_weights[i] != 0:
+                            chosen_adapter_ids.append(i)
+                    if len(chosen_adapter_ids) != k:
+                        random_element = random.choice(chosen_adapter_ids)
+                        chosen_adapter_ids.remove(random_element)
 
-                    model.set_active_adapters(None)
-                    # Delete the added adapter
-                    model.delete_adapter('chosen_top_1')
+                model.set_active_adapters(None)
+                # Delete the added adapter
+                model.delete_adapter('chosen_top_1')
 
-                    for pos in range(len(weight_vector)):
-                        if pos in chosen_adapter_ids.keys():
-                            weight_vector[pos] = chosen_adapter_ids[pos]
-                        else:
-                            weight_vector[pos] = 0
-                    print(weight_vector)
+                for pos in range(len(weight_vector)):
+                    if pos in chosen_adapter_ids:
+                        weight_vector[pos] = 1
+                    else:
+                        weight_vector[pos] = 0
             else:
-                weight_vector = get_priors(model, data_args.consider_model)
+                weight_vector = get_priors(model)
 
+            end_prior = time.time()
 
+            prior_duration = end_prior - start_prior
 
+            if data_args.evaluate_efficiency:
+                with open("log_timings.txt", 'a+') as timing_file:
+                    timing_file.write("Duration prior_calc: ")
+                    timing_file.write(str(prior_duration))
+                    timing_file.write("\n")
 
-            if data_args.top_k and not data_args.cumulative_gain:
-                adapters_to_use = []
-                new_weights = []
-                sorted_priors = sorted(weight_vector, reverse=True)
-                thres = sorted_priors[data_args.top_k - 1]
-                if data_args.topk_uniform:
-                    weight_vector = [0 if a_ < thres else 1 for a_ in weight_vector]
-                else:
-                    weight_vector = [0 if a_ < thres else a_ for a_ in weight_vector]
-                for i in range(len(weight_vector)):
-                    if weight_vector[i] != 0:
-                        adapters_to_use.append(data_args.adapter_dir[i])
-                with open(data_args.eval_file, 'a+') as outfile:
-                    outfile.write("These are the adapters that are weighted: ")
-                    if isinstance(adapters_to_use, np.ndarray):
-                        adapters_to_use = adapters_to_use.tolist()
-                    json.dump(adapters_to_use, outfile)
-                    outfile.write("\n")
-                for c in weight_vector:
-                    new_weights.append(c / sum(weight_vector))
-                weight_vector = new_weights
+                
 
-    if not training_args.do_train:
-        with open(data_args.eval_file, 'a+') as outfile:
-            outfile.write("\n")
-            if isinstance(weight_vector, np.ndarray):
-                weight_vector = weight_vector.tolist()
-            json.dump(weight_vector, outfile)
-            outfile.write("\n")
 
 
     #exit()
@@ -1840,6 +1661,7 @@ def main():
 
     # Weight space averaging of multiple adapters
     elif data_args.adapter_dir is not None and len(data_args.adapter_dir) > 1 and (data_args.combination_strategy == 'average' or data_args.combination_strategy == 'average+ensemble'):
+        start_avg = time.time()
         logger.info("*** Applying weight space averaging of the adapters ***")
         state_dicts = []
         for i in range(len(data_args.adapter_dir)):
@@ -1884,31 +1706,21 @@ def main():
             use_auth_token=True if model_args.use_auth_token else None,
             torch_dtype=torch_dtype,
         )
-        if 'llama' in model_args.model_name_or_path:
-            model.load_adapter(
-                data_args.adapter_dir[0],
-                load_as="adapter",
-                config=AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=32,
-                                     non_linearity="relu", ln_before=True, ln_after=False)
-            )
-        else:
-            model.load_adapter(
-                data_args.adapter_dir[0],
-                load_as="adapter",
-                config=AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=12,
-                                     non_linearity="relu", ln_before=True, ln_after=False)
-            )
+
+        model.load_adapter(
+            data_args.adapter_dir[0],
+            load_as="adapter",
+            config=AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=12,
+                                    non_linearity="relu", ln_before=True, ln_after=False)
+        )
         model.set_active_adapters("adapter")
         model.load_state_dict(state_dicts[0])
 
+
     # Add adapter that has not been trained yet   
     elif training_args.do_train:
-        if 'llama' in model_args.model_name_or_path:
-            adapter_args.adapter_config = AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=32,
-                                                        non_linearity="relu", ln_before=True, ln_after=False)
-        else:
-            adapter_args.adapter_config = AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=12,
-                                                        non_linearity="relu", ln_before=True, ln_after=False)
+        adapter_args.adapter_config = AdapterConfig(mh_adapter=False, output_adapter=True, reduction_factor=12,
+                                                    non_linearity="relu", ln_before=True, ln_after=False)
         setup_adapter_training(model, adapter_args, data_args.dataset_name or "clm")
 
     # Initialize our Trainer
@@ -1958,13 +1770,7 @@ def main():
         if len(weight_vector) > 0:
             logger.info("*** Evaluate with weights***")
             logger.info(weight_vector)
-            if not training_args.do_train:
-                with open(data_args.eval_file, 'a+') as outfile:
-                    outfile.write("\n")
-                    if isinstance(weight_vector,np.ndarray):
-                        weight_vector = weight_vector.tolist()
-                    json.dump(weight_vector, outfile)
-                    outfile.write("\n")
+
 
         if data_args.validation_file:
             logger.info("*** Evaluate on file: " + str(data_args.validation_file) + " ***")
@@ -1986,12 +1792,24 @@ def main():
             trainer.log_metrics("eval", metrics)
             trainer.save_metrics("eval", metrics)
 
+            end_avg = time.time()
+
+            duration_avg = end_avg - start_avg
+
+            if data_args.evaluate_efficiency:
+                with open("log_timings.txt", 'a+') as timing_file:
+                    timing_file.write("Duration averaging: ")
+                    timing_file.write(str(duration_avg))
+                    timing_file.write("\n")
+
             if not training_args.do_train:
                 with open(data_args.eval_file, 'a+') as outfile:
-                    outfile.write("Perplexity \n")
-                    outfile.write(str(perplexity))
-                    outfile.write("\n")
-                    outfile.write("\n")
+                    weight_str = '-'.join(str(e) for e in weight_vector)
+                    adapters_str = '-'.join(str(a) for a in adapters_to_use)
+                    outfile.write(f"{model_args.model_name_or_path},{'average'},{data_args.adapter_weighting},{weight_str},{adapters_str},{data_args.validation_file},{perplexity},{str(training_args.seed)},{str(data_args.top_k)}\n")
+
+
+
 
         if data_args.adapter_dir is not None and len(data_args.adapter_dir) > 1 and (data_args.combination_strategy == 'ensemble' or data_args.combination_strategy == 'average+ensemble'):
 
@@ -2009,8 +1827,7 @@ def main():
                 )
 
 
-                with open(data_args.eval_file, 'a+') as outfile:
-                    outfile.write('Now additionally ensemble')
+            start_ens = time.time()
 
 
             eval_dataloader = get_dataloader(eval_dataset)
@@ -2052,23 +1869,10 @@ def main():
 
                 preds = None
 
-                if data_args.consider_model:
-                    model = model.to(dtype=torch.float16, device=training_args.device)
-
-                    with torch.no_grad():
-
-                        if has_labels or loss_without_labels:
-                            loss, outputs = compute_loss(model, inputs, return_outputs=True)
-                            loss = loss.mean().detach()
-
-                            logits = outputs.logits
-
-                        logger.info("*** Adapters are weighted according to the weight vector ***")
-                        logits = logits * weight_vector[0]
-                        preds = logits if preds is None else torch.add(preds, logits)
-
 
                 for i in range(len(data_args.adapter_dir)):
+                    if weight_vector[i] == 0:
+                        continue
                     adapter_name = "adapter" + str(i)
                     model.load_adapter(
                         data_args.adapter_dir[i],
@@ -2092,10 +1896,7 @@ def main():
                             preds = logits if preds is None else torch.add(preds,logits)
                         else:
                             logger.info("*** Adapters are weighted according to the weight vector ***")
-                            if data_args.consider_model:
-                                weight = i + 1
-                            else:
-                                weight = i
+                            weight = i
                             logits = logits * weight_vector[weight]
                             preds = logits if preds is None else torch.add(preds,logits)
 
@@ -2140,14 +1941,26 @@ def main():
 
             trainer.log_metrics("eval", metrics)
             trainer.save_metrics("eval", metrics)
+
+
+            end_ens = time.time()
+
+            duration_ens = end_ens - start_ens
+
+            if data_args.evaluate_efficiency:
+                with open("log_timings.txt", 'a+') as timing_file:
+                    timing_file.write("Duration ensembling: ")
+                    timing_file.write(str(duration_ens))
+                    timing_file.write("\n")
+
             if not training_args.do_train:
                 with open(data_args.eval_file, 'a+') as outfile:
-                    outfile.write("Perplexity \n")
-                    outfile.write(str(perplexity))
-                    outfile.write("\n")
-                    outfile.write("\n")
+                    weight_str = '-'.join(str(e) for e in weight_vector)
+                    adapters_str = '-'.join(str(a) for a in adapters_to_use)
+                    outfile.write(f"{model_args.model_name_or_path},{'ensemble'},{data_args.adapter_weighting},{weight_str},{adapters_str},{data_args.validation_file},{perplexity},{str(training_args.seed)},{str(data_args.top_k)}\n")
 
-        else:
+
+        if not data_args.combination_strategy:
             metrics = trainer.evaluate()
 
             max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(
@@ -2162,12 +1975,7 @@ def main():
             trainer.log_metrics("eval", metrics)
             trainer.save_metrics("eval", metrics)
 
-            if not training_args.do_train:
-                with open(data_args.eval_file, 'a+') as outfile:
-                    outfile.write("Perplexity \n")
-                    outfile.write(str(perplexity))
-                    outfile.write("\n")
-                    outfile.write("\n")
+            
 
     kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-generation"}
 
