@@ -1,11 +1,11 @@
-![Logo WTW](/img/wtw_pic.svg)
+![Logo WTW](/img/wtw_pic.png)
 
 
 <h1 align="center">
 <span>What the Weight?! A Unified Framework for Zero-Shot Knowledge Composition</span>
 </h1>
 
-[![arxiv preprint]()]()
+[![arxiv preprint](https://img.shields.io/badge/arXiv-2208.01575-b31b1b.svg)]()
 
 ## Paper Abstract
 
