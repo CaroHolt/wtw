@@ -4,9 +4,19 @@
 </h1>
 
 ## Paper Abstract
-The knowledge encapsulated in a model is the core factor determining its final performance on down-stream tasks. Much research in NLP has focused on efficient methods for storing and adapting different types of knowledge, e.g., in dedicated modularized structures, and on how to effectively combine these modules, e.g., via  parameter averaging at test time. However, given the many possible options in composing knowledge, a thorough understanding of the mechanisms involved is missing, and hence it remains unclear which strategies to utilize.  
-In this work, we address this research gap by proposing a novel framework for zero-shot module composition, which encompasses existing and some novel variations for selecting, weighting, and combining parameter modules under a single unified notion. Focusing on the example of domain knowledge and adapter layers, our framework provides a systematic unification of concepts, allowing us to conduct the first comprehensive benchmarking study on various zero-shot knowledge composition strategies. In particular, we test two module combination methods (parameter averaging, output ensembling), and five selection and weighting strategies (uniform, and based on entropy, domain prior, TF-IDF, and semantic similarity) for their effectiveness and efficiency on 21 training and 10 test domains across three models. Our results highlight the efficacy of ensembling, but also hint at the power of simple though often-ignored weighting methods. We further conduct various in-depth analyses, that, for instance, allow us to understand the role of weighting vs. top-k selection, and we show that, to a certain extent, the performance of an adapter composition can even be predicted.  
+
+The knowledge encapsulated in a model is the core factor determining its final performance on downstream tasks. 
+Much research in NLP has focused on efficient methods for storing and adapting different types of knowledge, e.g., in dedicated modularized structures, and on how to effectively combine these. However, given the many possible options, a thorough understanding of the mechanisms involved is missing, and hence it remains unclear which strategies to utilize. 
+To address this research gap, we propose a novel framework for zero-shot module composition, which encompasses existing and some novel variations for selecting, weighting, and combining parameter modules under a single. Focusing on the scenario of domain knowledge and adapter layers, our framework provides a systematic unification of concepts, allowing us to conduct the first comprehensive benchmarking study on various zero-shot knowledge composition strategies. In particular, we test two module combination methods and five selection and weighting strategies for their effectiveness and efficiency in an extensive experimental setup. Our results highlight the efficacy of ensembling, but also hint at the power of simple though often-ignored weighting methods. Further in-depth analysis allow us to understand the role of weighting vs. top-k selection, and show that, to a certain extent, the performance of adapter composition can even be predicted.
 ------------------------
+## Getting Started
+
+We conducted all our experiments with Python 3.10. Before getting started, make sure you install the requirements listed in the `requirements.txt` file.
+
+```bash
+pip install -r requirements.txt
+```
+
 ## Repository Description
 
 This repository contains all code and data needed to reproduce the experiments and results reported in our paper.
@@ -59,29 +69,36 @@ Includes example shell files to run the python code.
 - **train_mlm_adapter.sh**
     - Contains a shell script to run *run_mlm_adapter.py* and trains a domain adapter using the specified variables. 
 
-- **eval_clm_adapter.sh**
+- **evaluate_clm_models.sh**
     - Contains a shell script to run *run_clm_adapter.py* and evaluates the adapters using our presented framework.
 
-- **eval_mlm_adapter.sh**
+- **evaluate_mlm_models.sh**
     - Contains a shell script to run *run_mlm_adapter.py* and evaluates the adapters using our presented framework.
 
+## License
 
+This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details
 
 
 ------------------------
 ## Citation
 
 ```
-@inproceedings{xxx,
-  title={xxx},
-  author={xxx},
-  booktitle={...},
-  year={xxx}
+@inproceedings{,
+    title = "What the Weight?! A Unified Framework for Zero-Shot Knowledge Composition",
+    author = "Holtermann, Carolin and Frohmann, Markus and Rekabsaz, Navid and Lauscher, Anne",
+    editor = "",
+    booktitle = "Findings of the Association for Computational Linguistics: EACL 2024",
+    year = "2024",
+    publisher = "Association for Computational Linguistics",
+    url = "",
+    doi = "",
+    pages = "",
 }
 ```
 
 
 ---
-*Author contact information:*
+*Author contact information: carolin.holtermann@uni-hamburg.de*
 
 
