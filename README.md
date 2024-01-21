@@ -3,6 +3,8 @@
 <span>What the Weight?! A Unified Framework for Zero-Shot Knowledge Composition</span>
 </h1>
 
+[![arxiv preprint](https://img.shields.io/badge/arXiv-2208.01575-b31b1b.svg)](https://arxiv.org/abs/2208.01575)
+
 ## Paper Abstract
 
 The knowledge encapsulated in a model is the core factor determining its final performance on downstream tasks. 
@@ -49,7 +51,7 @@ Includes all python files and notebooks subject to this paper.
 A brief description of the files in *code* is:
 
 - **creation_of_paper_plots.ipynb**
-    - This notebook can be used to evaluate the language model bias of different model architectures using the ABBA annotation corpus as a test set. This is done by calculating the models perplexity for stereotypically and anti-stereotypically biased sentences and performing a paired t-test on the results.
+    - This notebook can be used to recreate all plots present in the paper, based on the experimental results.
 
 - **run_clm_adapter.py**
     - This script is based on the *run_clm.py* script of the Adapter Hub, which can be found [here](https://github.com/Adapter-Hub/adapter-transformers/tree/master/examples/language-modeling). It is used to train the domain adapters using a causal language modeling loss.
@@ -76,15 +78,14 @@ Includes example shell files to run the python code.
 - **evaluate_mlm_models.sh**
     - Contains a shell script to run *run_mlm_adapter.py* and evaluates the adapters using our presented framework.
 
-## License
-
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details
 
 
 ------------------------
-## Citation
+## References
 
-```
+Please use the following bibtex entry if you use this model in your project (TBD):
+ 
+```bib
 @inproceedings{,
     title = "What the Weight?! A Unified Framework for Zero-Shot Knowledge Composition",
     author = "Holtermann, Carolin and Frohmann, Markus and Rekabsaz, Navid and Lauscher, Anne",
@@ -101,5 +102,10 @@ This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md
 
 ---
 *Author contact information: carolin.holtermann@uni-hamburg.de*
+
+
+## License
+
+All source code is made available under a MIT license. See `LICENSE.md` for the full license text.
 
 
